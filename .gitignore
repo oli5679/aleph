@@ -1,2 +1,5 @@
 /target
 .claude/
+
+# Large neural network files (use scripts/download-network.sh)
+networks/*.nnue

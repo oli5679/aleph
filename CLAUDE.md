@@ -130,29 +130,28 @@ Since we don't have time management yet, use fixed depth with UCI_LimitStrength:
 - **Win rate 40-60%**: Engine is approximately this ELO level
 - **Win rate < 30%**: Engine is weaker than this ELO level
 
-### Current Baseline (Phase 1, depth=4)
+### Current Baseline (NNUE Infrastructure, depth=4)
 
 | SF UCI_Elo | W-L-D   | Win Rate | Notes |
 |------------|---------|----------|-------|
-| 1320       | 10-0-0  | 100%     | Dominates |
-| 1420       | 9-0-1   | 95%      | Dominates |
-| 1640       | 7-2-1   | 75%      | Strong |
-| 2000       | 8-2-0   | 80%      | Strong |
-| 2100       | 5-3-2   | 60%      | Competitive |
-| 2250       | 3-5-2   | 40%      | Struggling |
-| 2700       | 2-7-1   | 25%      | Outclassed |
+| 1500       | 10-0-0  | 100%     | Dominates |
+| 2000       | 7-1-2   | 80%      | Much stronger |
+| 2200       | 7-3-0   | 70%      | Stronger |
+| 2400       | 6-3-1   | 65%      | Competitive edge |
+| 2500       | 5-3-2   | 60%      | Slight edge |
+| 2600       | 1-6-3   | 25%      | Outclassed |
 
-**Estimated Aleph ELO: ~2100-2150** (at depth 4)
+**Estimated Aleph ELO: ~2450-2500** (at depth 4)
 
 ### Regression Testing
 
 Before merging any changes, run this regression test to verify no performance degradation:
 
 ```bash
-# Regression test: must achieve >= 50% against SF ELO 2100
+# Regression test: must achieve >= 50% against SF ELO 2400
 ~/bin/cutechess-cli \
   -engine name=Aleph cmd=./target/release/aleph proto=uci \
-  -engine name="SF-2100" cmd=stockfish proto=uci option.UCI_LimitStrength=true option.UCI_Elo=2100 \
+  -engine name="SF-2400" cmd=stockfish proto=uci option.UCI_LimitStrength=true option.UCI_Elo=2400 \
   -each tc=inf depth=4 \
   -games 20 -repeat \
   -pgnout regression_test.pgn
@@ -162,7 +161,7 @@ Before merging any changes, run this regression test to verify no performance de
 ```
 
 **Regression Criteria:**
-- Must achieve >= 50% score against SF ELO 2100 at depth 4
+- Must achieve >= 50% score against SF ELO 2400 at depth 4
 - Must not drop more than 10 percentage points from baseline at any level
 - Any new loss patterns (e.g., repeated mating threats) should be investigated
 

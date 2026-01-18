@@ -1,4 +1,5 @@
 pub mod classical;
+pub mod nnue;
 
 use crate::position::Position;
 

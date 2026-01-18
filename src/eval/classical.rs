@@ -1,6 +1,7 @@
 use crate::eval::{Evaluator, Quantiles};
 use crate::position::Position;
 use crate::types::{Color, Piece};
+use crate::values::piece_value;
 
 /// Classical evaluation using material counting and piece-square tables.
 /// Returns Quantiles::certain(score) since there's no uncertainty.
@@ -25,22 +26,6 @@ impl Evaluator for ClassicalEval {
     }
 }
 
-/// Material values in centipawns
-const PAWN_VALUE: i16 = 100;
-const KNIGHT_VALUE: i16 = 320;
-const BISHOP_VALUE: i16 = 330;
-const ROOK_VALUE: i16 = 500;
-const QUEEN_VALUE: i16 = 900;
-
-const PIECE_VALUES: [i16; 6] = [
-    PAWN_VALUE,
-    KNIGHT_VALUE,
-    BISHOP_VALUE,
-    ROOK_VALUE,
-    QUEEN_VALUE,
-    0, // King has no material value
-];
-
 /// Evaluate position from side-to-move perspective.
 fn evaluate_classical(pos: &Position) -> i16 {
     let white_score = evaluate_side(pos, Color::White);
@@ -54,23 +39,23 @@ fn evaluate_classical(pos: &Position) -> i16 {
     }
 }
 
+/// Pieces that count for material (excludes King).
+const MATERIAL_PIECES: [Piece; 5] = [
+    Piece::Pawn,
+    Piece::Knight,
+    Piece::Bishop,
+    Piece::Rook,
+    Piece::Queen,
+];
+
 /// Evaluate one side's material and positional factors.
 fn evaluate_side(pos: &Position, color: Color) -> i16 {
     let mut score = 0i16;
 
-    // Material
-    for (piece_idx, &value) in PIECE_VALUES.iter().enumerate() {
-        let piece = match piece_idx {
-            0 => Piece::Pawn,
-            1 => Piece::Knight,
-            2 => Piece::Bishop,
-            3 => Piece::Rook,
-            4 => Piece::Queen,
-            5 => Piece::King,
-            _ => unreachable!(),
-        };
+    // Material (King has no material value)
+    for &piece in &MATERIAL_PIECES {
         let count = pos.pieces(color, piece).count() as i16;
-        score += count * value;
+        score += count * piece_value(piece);
     }
 
     // Piece-square tables

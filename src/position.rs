@@ -338,6 +338,16 @@ impl Position {
         self.pieces(color, Piece::King).lsb()
     }
 
+    /// Iterate over all pieces on the board, returning (square, color, piece).
+    /// Used for NNUE feature extraction.
+    pub fn all_pieces(&self) -> impl Iterator<Item = (Square, Color, Piece)> + '_ {
+        [Color::White, Color::Black].into_iter().flat_map(move |color| {
+            Piece::ALL.into_iter().flat_map(move |piece| {
+                self.pieces(color, piece).into_iter().map(move |sq| (sq, color, piece))
+            })
+        })
+    }
+
     pub fn is_attacked(&self, sq: Square, by: Color) -> bool {
         let occupied = self.all;
 
