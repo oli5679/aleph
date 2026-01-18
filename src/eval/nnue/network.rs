@@ -51,6 +51,7 @@ impl Default for PolicyOutput {
 }
 
 /// Feature transformer weights and biases.
+#[derive(Clone)]
 pub struct FeatureTransformer {
     /// Weights: HALF_DIMENSIONS x L1_SIZE (stored column-major for cache efficiency)
     pub weights: Vec<i16>,
@@ -109,6 +110,7 @@ impl FeatureTransformer {
 }
 
 /// Value head: takes concatenated accumulators → quantiles.
+#[derive(Clone)]
 pub struct ValueHead {
     /// First layer: (L1_SIZE * 2) → VALUE_HIDDEN1
     pub w1: Vec<i8>,
@@ -178,6 +180,7 @@ impl ValueHead {
 }
 
 /// Policy head: takes concatenated accumulators → move scores.
+#[derive(Clone)]
 pub struct PolicyHead {
     /// Single layer: (L1_SIZE * 2) → POLICY_OUTPUT
     pub weights: Vec<i8>,
@@ -225,6 +228,7 @@ impl PolicyHead {
 }
 
 /// Complete NNUE network.
+#[derive(Clone)]
 pub struct Network {
     pub feature_transformer: FeatureTransformer,
     pub value_head: ValueHead,
@@ -311,14 +315,29 @@ impl Network {
             *o = sum;
         }
 
-        // Scale outputs to centipawns (assuming 256 scale factor)
-        Quantiles::new(
-            (output[0] / 256) as i16,
-            (output[1] / 256) as i16,
-            (output[2] / 256) as i16,
-            (output[3] / 256) as i16,
-            (output[4] / 256) as i16,
-        )
+        // Apply ordered quantile transformation:
+        // output[0] = base (q10)
+        // output[1..] = deltas, apply softplus to ensure positive
+        // Then cumsum to get ordered quantiles
+        let scale = 256;
+        let base = output[0] / scale;
+
+        // Softplus approximation: softplus(x) ≈ max(0, x) + log(1 + exp(-|x|))
+        // For simplicity, use: softplus(x) ≈ max(0, x) for large x, x/2 + ln(2) for small x
+        // Even simpler: just use ReLU as approximation (works for trained networks)
+        let d1 = softplus_i32(output[1]) / scale;
+        let d2 = softplus_i32(output[2]) / scale;
+        let d3 = softplus_i32(output[3]) / scale;
+        let d4 = softplus_i32(output[4]) / scale;
+
+        // Cumsum for ordered quantiles
+        let q10 = base;
+        let q25 = q10 + d1;
+        let q50 = q25 + d2;
+        let q75 = q50 + d3;
+        let q90 = q75 + d4;
+
+        Quantiles::new(q10 as i16, q25 as i16, q50 as i16, q75 as i16, q90 as i16)
     }
 
     /// Forward pass through policy head to get move scores.
@@ -374,6 +393,37 @@ fn clipped_relu(x: i16) -> i8 {
 #[inline]
 fn clipped_relu_i32(x: i32) -> i8 {
     (x >> 6).clamp(0, 127) as i8 // Adjust for quantization scale
+}
+
+/// Softplus approximation for i32.
+/// softplus(x) = ln(1 + exp(x))
+/// For quantized inference, we use a piecewise linear approximation:
+/// - x < -256: return small positive (≈0)
+/// - x > 512: return x (linear for large x)
+/// - else: smooth transition
+#[inline]
+fn softplus_i32(x: i32) -> i32 {
+    if x < -512 {
+        // Very negative: softplus ≈ 0
+        1 // Small positive to avoid exact zero
+    } else if x > 1024 {
+        // Very positive: softplus ≈ x
+        x
+    } else {
+        // Middle range: approximate with shifted ReLU + offset
+        // softplus(0) ≈ ln(2) ≈ 0.693, scaled by 256 ≈ 177
+        // Simple approximation: max(0, x) + 177 for x near 0
+        // Better: piecewise linear
+        let offset = 177; // ln(2) * 256
+        if x < 0 {
+            // For negative x: softplus(x) ≈ exp(x), which is small
+            // Linear approximation: (x + 512) / 4 for x in [-512, 0]
+            ((x + 512) * offset / 512).max(1)
+        } else {
+            // For positive x: softplus(x) ≈ x + ln(2) - exp(-x)
+            x + offset - (offset * 256 / (256 + x)).max(0)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -87,6 +87,59 @@ fn main() {
                 }
             }
         }
+        "nnue-search" => {
+            let path = args.get(2).map(|s| s.as_str()).unwrap_or("training/small_nnue.bin");
+            let depth: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(6);
+            let fen = args.get(4).map(|s| s.as_str()).unwrap_or(aleph::position::STARTPOS);
+
+            println!("Loading NNUE from: {}", path);
+            let network = match aleph::eval::nnue::loader::load_network(path) {
+                Ok(n) => n,
+                Err(e) => {
+                    println!("Error loading NNUE: {}", e);
+                    return;
+                }
+            };
+            println!("NNUE loaded successfully!");
+
+            let pos = Position::from_fen(fen).expect("Invalid FEN");
+            println!("Position: {}", fen);
+            println!("Depth: {}", depth);
+            println!("{}", pos);
+
+            // Test evaluation
+            let eval = aleph::eval::nnue::DualNnueEvaluator::new(network);
+            let quantiles = aleph::eval::Evaluator::evaluate(&eval, &pos);
+            println!();
+            println!("NNUE Evaluation:");
+            println!("  q10: {} cp", quantiles.q10);
+            println!("  q25: {} cp", quantiles.q25);
+            println!("  q50: {} cp (median)", quantiles.q50);
+            println!("  q75: {} cp", quantiles.q75);
+            println!("  q90: {} cp", quantiles.q90);
+            println!("  uncertainty: {}", quantiles.uncertainty());
+
+            // Search
+            let mut tt = aleph::tt::TranspositionTable::new(64);
+            let mut searcher = aleph::search::Searcher::new(pos, eval, &mut tt);
+
+            let start = Instant::now();
+            let info = searcher.search(depth);
+            let elapsed = start.elapsed();
+
+            println!();
+            println!("Search Results:");
+            println!("  Best move: {}", if info.pv.is_empty() { "none".to_string() } else { info.pv[0].to_string() });
+            println!("  Score: {} cp", info.score);
+            println!("  Nodes: {}", info.nodes);
+            println!("  Time: {:.3}s", elapsed.as_secs_f64());
+            println!("  NPS: {:.0}", info.nodes as f64 / elapsed.as_secs_f64());
+            print!("  PV: ");
+            for mv in &info.pv {
+                print!("{} ", mv);
+            }
+            println!();
+        }
         "--help" | "-h" | "help" => {
             print_help();
         }

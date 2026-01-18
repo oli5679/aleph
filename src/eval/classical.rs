@@ -64,65 +64,28 @@ fn evaluate_side(pos: &Position, color: Color) -> i16 {
     score
 }
 
+/// Sum PST values for all pieces of a type on the board.
+fn pst_sum(pos: &Position, color: Color, piece: Piece, pst: &[i16; 64]) -> i16 {
+    pos.pieces(color, piece)
+        .map(|sq| {
+            let idx = if color == Color::White {
+                sq.index()
+            } else {
+                sq.flip_rank().index()
+            };
+            pst[idx]
+        })
+        .sum()
+}
+
 /// Piece-square table bonus for a side.
 fn psqt_score(pos: &Position, color: Color) -> i16 {
-    let mut score = 0i16;
-
-    for sq in pos.pieces(color, Piece::Pawn) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += PAWN_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Knight) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += KNIGHT_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Bishop) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += BISHOP_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Rook) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += ROOK_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Queen) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += QUEEN_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::King) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += KING_PST[idx];
-    }
-
-    score
+    pst_sum(pos, color, Piece::Pawn, &PAWN_PST)
+        + pst_sum(pos, color, Piece::Knight, &KNIGHT_PST)
+        + pst_sum(pos, color, Piece::Bishop, &BISHOP_PST)
+        + pst_sum(pos, color, Piece::Rook, &ROOK_PST)
+        + pst_sum(pos, color, Piece::Queen, &QUEEN_PST)
+        + pst_sum(pos, color, Piece::King, &KING_PST)
 }
 
 // Piece-square tables (from White's perspective, a1=0, h8=63)

@@ -3,3 +3,14 @@
 
 # Large neural network files (use scripts/download-network.sh)
 networks/*.nnue
+
+# Training artifacts
+training/*.bin
+training/*.jsonl
+training/__pycache__/
+
+# Data files (opening books, tablebases)
+data/
+
+# Benchmark logs
+*.log

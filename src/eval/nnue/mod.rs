@@ -7,7 +7,9 @@
 //! The architecture uses transfer learning from Stockfish's NNUE feature transformer.
 
 pub mod accumulator;
+pub mod dual;
 pub mod features;
+pub mod incremental;
 pub mod loader;
 pub mod network;
 pub mod stockfish;
@@ -17,7 +19,9 @@ use crate::position::Position;
 use crate::types::Move;
 
 pub use accumulator::Accumulator;
+pub use dual::DualNnueEvaluator;
 pub use features::HalfKAv2;
+pub use incremental::IncrementalNnue;
 pub use network::{Network, PolicyOutput};
 
 /// NNUE Evaluator implementing the Evaluator trait.

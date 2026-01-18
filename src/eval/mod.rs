@@ -47,9 +47,10 @@ impl Quantiles {
 
     /// Uncertainty spread (q90 - q10).
     /// Zero for classical eval, positive for distributional eval.
+    /// Uses saturating subtraction to avoid overflow.
     #[inline]
     pub const fn uncertainty(self) -> i16 {
-        self.q90 - self.q10
+        self.q90.saturating_sub(self.q10)
     }
 
     /// Check if pessimistic bound beats beta (safe to prune).

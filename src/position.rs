@@ -313,6 +313,16 @@ impl Position {
         self.ep_square
     }
 
+    #[inline]
+    pub fn halfmove_clock(&self) -> u8 {
+        self.halfmove
+    }
+
+    #[inline]
+    pub fn fullmove_number(&self) -> u16 {
+        self.fullmove
+    }
+
     pub fn piece_at(&self, sq: Square) -> Option<(Color, Piece)> {
         let bb = Bitboard::from_sq(sq);
         if (self.all & bb).is_empty() {

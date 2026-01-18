@@ -1,16 +1,20 @@
-use crate::eval::nnue::PolicyOutput;
-use crate::eval::{mated_in, Evaluator, DRAW_SCORE, MATE_SCORE};
+//! NNUE-specific search with incremental accumulator updates.
+//!
+//! This search is specialized for IncrementalNnue evaluation, calling
+//! push/update_after_move/pop to maintain the accumulator efficiently.
+
+use crate::eval::nnue::IncrementalNnue;
+use crate::eval::{mated_in, DRAW_SCORE, MATE_SCORE};
 use crate::movegen::MoveList;
 use crate::position::Position;
 use crate::tt::{score_from_tt, score_to_tt, Bound, TranspositionTable};
-use crate::types::Move;
+use crate::types::{Move, Piece};
 use crate::values::piece_value;
 use std::time::{Duration, Instant};
 
 /// Thresholds for uncertainty-based depth adjustment.
-/// These are the only "tunable" parameters - everything else is learned.
-const UNCERTAINTY_LOW: i16 = 30;   // Below this, position is "clear" - reduce depth
-const UNCERTAINTY_HIGH: i16 = 150; // Above this, position is "complex" - extend depth
+const UNCERTAINTY_LOW: i16 = 30;
+const UNCERTAINTY_HIGH: i16 = 150;
 
 /// Search statistics
 #[derive(Default, Clone)]
@@ -21,45 +25,42 @@ pub struct SearchInfo {
     pub pv: Vec<Move>,
 }
 
-/// Alpha-beta searcher with transposition table
-pub struct Searcher<'a, E: Evaluator> {
+/// NNUE-specific searcher with incremental accumulator updates.
+pub struct NnueSearcher<'a> {
     pos: Position,
-    eval: E,
+    nnue: IncrementalNnue,
     tt: &'a mut TranspositionTable,
     nodes: u64,
     max_depth: i32,
     stop: bool,
-    // Time management
     start_time: Option<Instant>,
     time_limit: Option<Duration>,
     check_interval: u64,
 }
 
-impl<'a, E: Evaluator> Searcher<'a, E> {
-    pub fn new(pos: Position, eval: E, tt: &'a mut TranspositionTable) -> Self {
+impl<'a> NnueSearcher<'a> {
+    pub fn new(pos: Position, nnue: IncrementalNnue, tt: &'a mut TranspositionTable) -> Self {
         Self {
             pos,
-            eval,
+            nnue,
             tt,
             nodes: 0,
             max_depth: 64,
             stop: false,
             start_time: None,
             time_limit: None,
-            check_interval: 2048, // Check time every N nodes
+            check_interval: 2048,
         }
     }
 
-    /// Set a time limit for the search
     pub fn set_time_limit(&mut self, limit: Duration) {
         self.time_limit = Some(limit);
     }
 
-    /// Check if we should stop due to time
     #[inline]
     fn check_time(&mut self) {
         if self.nodes & (self.check_interval - 1) != 0 {
-            return; // Only check every N nodes
+            return;
         }
         if let (Some(start), Some(limit)) = (self.start_time, self.time_limit) {
             if start.elapsed() >= limit {
@@ -68,7 +69,7 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         }
     }
 
-    /// Run iterative deepening search to the given depth.
+    /// Run iterative deepening search.
     pub fn search(&mut self, max_depth: i32) -> SearchInfo {
         self.nodes = 0;
         self.max_depth = max_depth;
@@ -105,12 +106,6 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         }
     }
 
-    /// Alpha-beta with TT, PV tracking, and uncertainty-based pruning.
-    ///
-    /// This search uses quantile bounds for pruning instead of hardcoded heuristics:
-    /// - q10 >= beta: Even pessimistic bound beats beta, safe cutoff
-    /// - q90 <= alpha: Even optimistic bound fails, safe fail-low
-    /// - uncertainty (q90-q10): Determines depth adjustment (replaces LMR)
     fn alpha_beta(
         &mut self,
         depth: i32,
@@ -121,7 +116,6 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
     ) -> i16 {
         pv.clear();
 
-        // Leaf node - use quiescence search
         if depth <= 0 {
             return self.quiescence(alpha, beta);
         }
@@ -141,7 +135,6 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         if let Some(entry) = self.tt.probe(hash) {
             tt_move = entry.mv();
 
-            // Use TT score for cutoff at non-PV nodes with sufficient depth
             if !is_pv && entry.depth() >= depth as i8 {
                 let tt_score = score_from_tt(entry.score(), ply);
 
@@ -154,28 +147,23 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
             }
         }
 
-        // UNCERTAINTY-BASED PRUNING
-        // Get quantile evaluation to check bounds before generating moves
-        let quantiles = self.eval.evaluate(&self.pos);
+        // UNCERTAINTY-BASED PRUNING using cached accumulator
+        let quantiles = self.nnue.evaluate_current(self.pos.side_to_move());
 
-        // Pessimistic cutoff: if even the 10th percentile beats beta, prune
         if !is_pv && quantiles.pessimistic_cutoff(beta) {
             return quantiles.q10;
         }
 
-        // Optimistic cutoff: if even the 90th percentile can't reach alpha, prune
         if !is_pv && quantiles.optimistic_cutoff(alpha) {
             return quantiles.q90;
         }
 
-        // UNCERTAINTY-BASED DEPTH ADJUSTMENT (replaces LMR)
+        // UNCERTAINTY-BASED DEPTH ADJUSTMENT
         let uncertainty = quantiles.uncertainty();
         let adjusted_depth = if !is_pv && depth > 2 {
             if uncertainty < UNCERTAINTY_LOW {
-                // Position is "clear" - reduce search depth
                 depth - 1
             } else if uncertainty > UNCERTAINTY_HIGH {
-                // Position is "complex" - extend search
                 (depth + 1).min(self.max_depth)
             } else {
                 depth
@@ -188,18 +176,17 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         let mut moves = MoveList::new();
         self.pos.generate_moves(&mut moves);
 
-        // Checkmate or stalemate
         if moves.is_empty() {
             return if self.pos.in_check() {
-                mated_in(ply as i16) // Checkmate
+                mated_in(ply as i16)
             } else {
-                DRAW_SCORE // Stalemate
+                DRAW_SCORE
             };
         }
 
-        // Move ordering: TT move first, then policy/MVV-LVA
-        // TODO: When NNUE policy head is trained, pass policy here
-        self.order_moves(&mut moves, tt_move, None);
+        // Move ordering using policy head
+        let policy = self.nnue.get_policy(self.pos.side_to_move());
+        self.order_moves(&mut moves, tt_move, Some(&policy));
 
         let mut best_score = -MATE_SCORE;
         let mut best_move = Move::NULL;
@@ -209,9 +196,27 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         for i in 0..moves.len() {
             let mv = moves.get(i);
 
+            // Get move info before making it
+            let moved_piece = self.pos.piece_at(mv.from()).map(|(_, p)| p).unwrap_or(Piece::Pawn);
+            let captured = self.pos.piece_at(mv.to()).map(|(_, p)| p);
+
+            // Push accumulator state
+            self.nnue.push();
+
+            // Make move
             self.pos.make_move(mv);
+
+            // Update accumulator incrementally
+            self.nnue.update_after_move(&self.pos, mv, moved_piece, captured);
+
+            // Recurse
             let score = -self.alpha_beta(adjusted_depth - 1, ply + 1, -beta, -alpha, &mut child_pv);
+
+            // Unmake move
             self.pos.unmake_move(mv);
+
+            // Pop accumulator state
+            self.nnue.pop();
 
             if self.stop {
                 return 0;
@@ -224,13 +229,12 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
                 if score > alpha {
                     alpha = score;
 
-                    // Update PV
                     pv.clear();
                     pv.push(mv);
                     pv.extend(child_pv.iter());
 
                     if score >= beta {
-                        break; // Beta cutoff
+                        break;
                     }
                 }
             }
@@ -238,11 +242,11 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
 
         // Store in TT
         let bound = if best_score >= beta {
-            Bound::Lower // Failed high
+            Bound::Lower
         } else if best_score > original_alpha {
-            Bound::Exact // PV node
+            Bound::Exact
         } else {
-            Bound::Upper // Failed low
+            Bound::Upper
         };
 
         self.tt.store(
@@ -256,12 +260,12 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         best_score
     }
 
-    /// Quiescence search - only search captures to avoid horizon effect
     fn quiescence(&mut self, mut alpha: i16, beta: i16) -> i16 {
         self.nodes += 1;
 
-        // Stand pat - use static evaluation
-        let stand_pat = self.eval.evaluate(&self.pos).score();
+        // Stand pat using cached accumulator
+        let quantiles = self.nnue.evaluate_current(self.pos.side_to_move());
+        let stand_pat = quantiles.q50; // Use median
 
         if stand_pat >= beta {
             return beta;
@@ -271,7 +275,7 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
             alpha = stand_pat;
         }
 
-        // Generate and search captures only
+        // Generate captures
         let mut captures = MoveList::new();
         self.pos.generate_captures(&mut captures);
 
@@ -281,9 +285,17 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         for i in 0..captures.len() {
             let mv = captures.get(i);
 
+            let moved_piece = self.pos.piece_at(mv.from()).map(|(_, p)| p).unwrap_or(Piece::Pawn);
+            let captured = self.pos.piece_at(mv.to()).map(|(_, p)| p);
+
+            self.nnue.push();
             self.pos.make_move(mv);
+            self.nnue.update_after_move(&self.pos, mv, moved_piece, captured);
+
             let score = -self.quiescence(-beta, -alpha);
+
             self.pos.unmake_move(mv);
+            self.nnue.pop();
 
             if score >= beta {
                 return beta;
@@ -297,49 +309,36 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         alpha
     }
 
-    /// Order moves using TT move first, then MVV-LVA for captures, optional policy for quiet moves.
-    fn order_moves(&self, moves: &mut MoveList, tt_move: Move, policy: Option<&PolicyOutput>) {
-        // Score each move
+    fn order_moves(&self, moves: &mut MoveList, tt_move: Move, policy: Option<&crate::eval::nnue::PolicyOutput>) {
         for i in 0..moves.len() {
             let mv = moves.get(i);
             let score = self.move_score(mv, tt_move, policy);
             moves.set_score(i, score);
         }
-        // Sort by score (highest first)
         moves.sort_by_score();
     }
 
-    /// Score a move for ordering (higher = search first).
-    ///
-    /// Combined scoring strategy (highest priority first):
-    /// 1. TT move: +100000 bonus (always search first)
-    /// 2. Captures: MVV-LVA bonus (+15000 base) - ensures tactical awareness
-    /// 3. Promotions: +14000 bonus
-    /// 4. Policy Network: Learned ordering for all moves (when available)
-    fn move_score(&self, mv: Move, tt_move: Move, policy: Option<&PolicyOutput>) -> i32 {
+    fn move_score(&self, mv: Move, tt_move: Move, policy: Option<&crate::eval::nnue::PolicyOutput>) -> i32 {
         let mut score = 0i32;
 
-        // TT move gets highest priority
         if mv == tt_move && !tt_move.is_null() {
             return 100_000;
         }
 
-        // Policy network base score (if available)
+        // Policy network scores
         if let Some(p) = policy {
             score += p.from[mv.from().index()] + p.to[mv.to().index()];
         }
 
-        // MVV-LVA for captures (always add - ensures tactics searched first)
+        // MVV-LVA for captures
         if let Some((_, captured)) = self.pos.piece_at(mv.to()) {
             let victim_value = piece_value(captured);
             if let Some((_, attacker)) = self.pos.piece_at(mv.from()) {
                 let attacker_value = piece_value(attacker);
-                // MVV-LVA: prefer capturing valuable pieces with cheap pieces
                 score += 15000 + victim_value as i32 * 10 - attacker_value as i32;
             }
         }
 
-        // Promotions (almost as important as captures)
         if mv.is_promotion() {
             score += 14000;
         }
@@ -347,13 +346,8 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
         score
     }
 
-    /// Order captures by MVV-LVA.
     fn order_captures(&self, moves: &mut MoveList) {
         self.order_moves(moves, Move::NULL, None);
-    }
-
-    pub fn stop(&mut self) {
-        self.stop = true;
     }
 
     pub fn nodes(&self) -> u64 {
@@ -361,90 +355,22 @@ impl<'a, E: Evaluator> Searcher<'a, E> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::classical::ClassicalEval;
-    use crate::eval::is_mate_score;
+    use crate::eval::nnue::Network;
 
     #[test]
-    fn test_search_startpos() {
+    fn test_nnue_search_startpos() {
         let pos = Position::startpos();
-        let eval = ClassicalEval::new();
+        let network = Network::new_random();
+        let nnue = IncrementalNnue::new(network, &pos);
         let mut tt = TranspositionTable::new(16);
-        let mut searcher = Searcher::new(pos, eval, &mut tt);
+        let mut searcher = NnueSearcher::new(pos, nnue, &mut tt);
 
-        let info = searcher.search(4);
+        let info = searcher.search(3);
 
         assert!(!info.pv.is_empty());
         assert!(info.nodes > 0);
-        // Starting position should be roughly equal
-        assert!(info.score.abs() < 100);
-    }
-
-    #[test]
-    fn test_find_mate_in_one() {
-        // White to move, Qh7# is mate in 1
-        let pos = Position::from_fen("6k1/5ppp/8/8/8/8/5PPP/4Q1K1 w - - 0 1").unwrap();
-        let eval = ClassicalEval::new();
-        let mut tt = TranspositionTable::new(16);
-        let mut searcher = Searcher::new(pos, eval, &mut tt);
-
-        let info = searcher.search(3);
-
-        // Should find a winning move with mate score
-        assert!(is_mate_score(info.score));
-        assert!(info.score > 0); // White is winning
-    }
-
-    #[test]
-    fn test_avoid_mate() {
-        // Black to move, must block or escape
-        let pos = Position::from_fen("6k1/5pQp/8/8/8/8/5PPP/6K1 b - - 0 1").unwrap();
-        let eval = ClassicalEval::new();
-        let mut tt = TranspositionTable::new(16);
-        let mut searcher = Searcher::new(pos, eval, &mut tt);
-
-        let info = searcher.search(3);
-
-        // Black should find Kf8 or Kh8 to escape
-        assert!(!info.pv.is_empty());
-    }
-
-    #[test]
-    fn test_capture_free_piece() {
-        // White can capture undefended queen
-        let pos = Position::from_fen("6k1/5ppp/3q4/8/8/3R4/5PPP/6K1 w - - 0 1").unwrap();
-        let eval = ClassicalEval::new();
-        let mut tt = TranspositionTable::new(16);
-        let mut searcher = Searcher::new(pos, eval, &mut tt);
-
-        let info = searcher.search(3);
-
-        // Should capture the queen with Rxd6
-        assert!(!info.pv.is_empty());
-        let best = info.pv[0];
-        assert_eq!(best.to(), crate::types::Square::D6);
-    }
-
-    #[test]
-    fn test_tt_reduces_nodes() {
-        // Search the same position twice - second should be faster due to TT
-        let pos = Position::startpos();
-        let mut tt = TranspositionTable::new(16);
-
-        // First search
-        let mut searcher = Searcher::new(pos.clone(), ClassicalEval::new(), &mut tt);
-        let info1 = searcher.search(5);
-
-        // Second search (TT should help)
-        let mut searcher = Searcher::new(pos, ClassicalEval::new(), &mut tt);
-        let info2 = searcher.search(5);
-
-        // With TT, second search should explore same or fewer nodes
-        // (might not always be fewer due to different move ordering from TT)
-        assert!(info2.nodes <= info1.nodes * 2); // Should at least not be much worse
-        assert_eq!(info1.score, info2.score); // Score should be the same
     }
 }

@@ -88,6 +88,15 @@ impl MoveList {
     pub fn truncate(&mut self, len: usize) {
         self.len = len;
     }
+
+    /// Push all four promotion moves for a pawn reaching the back rank.
+    #[inline]
+    pub fn push_promotions(&mut self, from: Square, to: Square) {
+        self.push(Move::new_promotion(from, to, Piece::Queen));
+        self.push(Move::new_promotion(from, to, Piece::Rook));
+        self.push(Move::new_promotion(from, to, Piece::Bishop));
+        self.push(Move::new_promotion(from, to, Piece::Knight));
+    }
 }
 
 impl Default for MoveList {
@@ -117,15 +126,14 @@ impl Position {
 
     pub fn generate_captures(&self, moves: &mut MoveList) {
         let us = self.side_to_move();
-        let our_pieces = self.occupied_by(us);
         let their_pieces = self.occupied_by(us.flip());
 
         self.gen_pawn_captures(moves, us, their_pieces);
-        self.gen_knight_captures(moves, us, our_pieces, their_pieces);
-        self.gen_bishop_captures(moves, us, our_pieces, their_pieces);
-        self.gen_rook_captures(moves, us, our_pieces, their_pieces);
-        self.gen_queen_captures(moves, us, our_pieces, their_pieces);
-        self.gen_king_captures(moves, us, our_pieces, their_pieces);
+        self.gen_knight_captures(moves, us, their_pieces);
+        self.gen_bishop_captures(moves, us, their_pieces);
+        self.gen_rook_captures(moves, us, their_pieces);
+        self.gen_queen_captures(moves, us, their_pieces);
+        self.gen_king_captures(moves, us, their_pieces);
 
         self.filter_legal(moves);
     }
@@ -133,10 +141,10 @@ impl Position {
     fn gen_pawn_moves(&self, moves: &mut MoveList, us: Color, empty: Bitboard, their_pieces: Bitboard) {
         let pawns = self.pieces(us, Piece::Pawn);
 
-        let (push_dir, start_rank, _promo_rank): (fn(Bitboard) -> Bitboard, Bitboard, Bitboard) = if us == Color::White {
-            (Bitboard::north, Bitboard::RANK_2, Bitboard::RANK_7)
+        let (push_dir, start_rank): (fn(Bitboard) -> Bitboard, Bitboard) = if us == Color::White {
+            (Bitboard::north, Bitboard::RANK_2)
         } else {
-            (Bitboard::south, Bitboard::RANK_7, Bitboard::RANK_2)
+            (Bitboard::south, Bitboard::RANK_7)
         };
 
         // Single pushes
@@ -159,10 +167,7 @@ impl Position {
             } else {
                 Square(to.0 + 8)
             };
-            moves.push(Move::new_promotion(from, to, Piece::Queen));
-            moves.push(Move::new_promotion(from, to, Piece::Rook));
-            moves.push(Move::new_promotion(from, to, Piece::Bishop));
-            moves.push(Move::new_promotion(from, to, Piece::Knight));
+            moves.push_promotions(from, to);
         }
 
         // Double pushes
@@ -187,11 +192,6 @@ impl Position {
 
     fn gen_pawn_captures(&self, moves: &mut MoveList, us: Color, their_pieces: Bitboard) {
         let pawns = self.pieces(us, Piece::Pawn);
-        let _promo_rank = if us == Color::White {
-            Bitboard::RANK_7
-        } else {
-            Bitboard::RANK_2
-        };
 
         let (attack_left, attack_right): (fn(Bitboard) -> Bitboard, fn(Bitboard) -> Bitboard) = if us == Color::White {
             (Bitboard::north_west, Bitboard::north_east)
@@ -215,10 +215,7 @@ impl Position {
             } else {
                 Square(to.0 + 9)
             };
-            moves.push(Move::new_promotion(from, to, Piece::Queen));
-            moves.push(Move::new_promotion(from, to, Piece::Rook));
-            moves.push(Move::new_promotion(from, to, Piece::Bishop));
-            moves.push(Move::new_promotion(from, to, Piece::Knight));
+            moves.push_promotions(from, to);
         }
 
         // Right captures
@@ -237,10 +234,7 @@ impl Position {
             } else {
                 Square(to.0 + 7)
             };
-            moves.push(Move::new_promotion(from, to, Piece::Queen));
-            moves.push(Move::new_promotion(from, to, Piece::Rook));
-            moves.push(Move::new_promotion(from, to, Piece::Bishop));
-            moves.push(Move::new_promotion(from, to, Piece::Knight));
+            moves.push_promotions(from, to);
         }
 
         // En passant
@@ -269,7 +263,7 @@ impl Position {
         }
     }
 
-    fn gen_knight_captures(&self, moves: &mut MoveList, us: Color, _our_pieces: Bitboard, their_pieces: Bitboard) {
+    fn gen_knight_captures(&self, moves: &mut MoveList, us: Color, their_pieces: Bitboard) {
         for from in self.pieces(us, Piece::Knight) {
             let attacks = knight_attacks(from) & their_pieces;
             for to in attacks {
@@ -288,7 +282,7 @@ impl Position {
         }
     }
 
-    fn gen_bishop_captures(&self, moves: &mut MoveList, us: Color, _our_pieces: Bitboard, their_pieces: Bitboard) {
+    fn gen_bishop_captures(&self, moves: &mut MoveList, us: Color, their_pieces: Bitboard) {
         let occupied = self.all_occupied();
         for from in self.pieces(us, Piece::Bishop) {
             let attacks = bishop_attacks(from, occupied) & their_pieces;
@@ -308,7 +302,7 @@ impl Position {
         }
     }
 
-    fn gen_rook_captures(&self, moves: &mut MoveList, us: Color, _our_pieces: Bitboard, their_pieces: Bitboard) {
+    fn gen_rook_captures(&self, moves: &mut MoveList, us: Color, their_pieces: Bitboard) {
         let occupied = self.all_occupied();
         for from in self.pieces(us, Piece::Rook) {
             let attacks = rook_attacks(from, occupied) & their_pieces;
@@ -328,7 +322,7 @@ impl Position {
         }
     }
 
-    fn gen_queen_captures(&self, moves: &mut MoveList, us: Color, _our_pieces: Bitboard, their_pieces: Bitboard) {
+    fn gen_queen_captures(&self, moves: &mut MoveList, us: Color, their_pieces: Bitboard) {
         let occupied = self.all_occupied();
         for from in self.pieces(us, Piece::Queen) {
             let attacks = queen_attacks(from, occupied) & their_pieces;
@@ -346,7 +340,7 @@ impl Position {
         }
     }
 
-    fn gen_king_captures(&self, moves: &mut MoveList, us: Color, _our_pieces: Bitboard, their_pieces: Bitboard) {
+    fn gen_king_captures(&self, moves: &mut MoveList, us: Color, their_pieces: Bitboard) {
         let king_sq = self.king_sq(us);
         let attacks = king_attacks(king_sq) & their_pieces;
         for to in attacks {

@@ -1,7 +1,11 @@
+use crate::book::OpeningBook;
 use crate::eval::classical::ClassicalEval;
 use crate::eval::is_mate_score;
+use crate::eval::nnue::{loader, IncrementalNnue, Network};
 use crate::position::Position;
 use crate::search::Searcher;
+use crate::search_nnue::NnueSearcher;
+use crate::tablebase::Tablebase;
 use crate::tt::TranspositionTable;
 use crate::types::{Color, Move};
 use std::io::{self, BufRead, Write};
@@ -11,6 +15,20 @@ const ENGINE_NAME: &str = "Aleph";
 const ENGINE_AUTHOR: &str = "Aleph Authors";
 const DEFAULT_HASH_MB: usize = 64;
 
+/// Evaluator type - either classical or NNUE
+enum EvalType {
+    Classical,
+    Nnue(Network),
+}
+
+/// Engine options that persist across moves.
+struct EngineState {
+    book: Option<OpeningBook>,
+    tablebase: Option<Tablebase>,
+    use_book: bool,
+    nnue_path: Option<String>,
+}
+
 /// Run the UCI protocol loop
 pub fn uci_loop() {
     let stdin = io::stdin();
@@ -18,6 +36,13 @@ pub fn uci_loop() {
 
     let mut pos = Position::startpos();
     let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
+    let mut eval_type = EvalType::Classical;
+    let mut state = EngineState {
+        book: None,
+        tablebase: None,
+        use_book: true,
+        nnue_path: None,
+    };
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -35,22 +60,85 @@ pub fn uci_loop() {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
                 println!("option name Hash type spin default {} min 1 max 4096", DEFAULT_HASH_MB);
+                println!("option name EvalFile type string default <empty>");
+                println!("option name OwnBook type check default true");
+                println!("option name BookFile type string default <empty>");
+                println!("option name SyzygyPath type string default <empty>");
                 println!("uciok");
                 stdout.flush().ok();
             }
 
             "setoption" => {
-                // Parse: setoption name Hash value 128
+                // Parse: setoption name <Name> value <Value>
                 if tokens.len() >= 5 && tokens[1] == "name" && tokens[3] == "value" {
                     let name = tokens[2].to_lowercase();
-                    let value = tokens[4];
+                    let value = tokens[4..].join(" ");
 
-                    if name == "hash" {
-                        if let Ok(size_mb) = value.parse::<usize>() {
-                            let size_mb = size_mb.max(1).min(4096);
-                            tt.resize(size_mb);
-                            eprintln!("info string Hash table resized to {} MB", size_mb);
+                    match name.as_str() {
+                        "hash" => {
+                            if let Ok(size_mb) = value.parse::<usize>() {
+                                let size_mb = size_mb.max(1).min(4096);
+                                tt.resize(size_mb);
+                                eprintln!("info string Hash table resized to {} MB", size_mb);
+                            }
                         }
+                        "evalfile" => {
+                            if value.is_empty() || value == "<empty>" {
+                                eval_type = EvalType::Classical;
+                                state.nnue_path = None;
+                                eprintln!("info string Using classical evaluation");
+                            } else {
+                                match loader::load_network(&value) {
+                                    Ok(network) => {
+                                        eval_type = EvalType::Nnue(network);
+                                        state.nnue_path = Some(value.clone());
+                                        eprintln!("info string Loaded NNUE from {}", value);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("info string Failed to load NNUE: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        "ownbook" => {
+                            state.use_book = value.to_lowercase() == "true";
+                            eprintln!("info string OwnBook set to {}", state.use_book);
+                        }
+                        "bookfile" => {
+                            if value.is_empty() || value == "<empty>" {
+                                state.book = None;
+                                eprintln!("info string Opening book disabled");
+                            } else {
+                                match OpeningBook::load(&value) {
+                                    Ok(book) => {
+                                        let entries = book.len();
+                                        state.book = Some(book);
+                                        eprintln!("info string Loaded opening book with {} entries", entries);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("info string Failed to load opening book: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        "syzygypath" => {
+                            if value.is_empty() || value == "<empty>" {
+                                state.tablebase = None;
+                                eprintln!("info string Syzygy tablebases disabled");
+                            } else {
+                                match Tablebase::new(&value) {
+                                    Ok(tb) => {
+                                        let max_pieces = tb.max_pieces();
+                                        state.tablebase = Some(tb);
+                                        eprintln!("info string Loaded Syzygy tablebases ({}-piece)", max_pieces);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("info string Failed to load Syzygy tablebases: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -71,15 +159,36 @@ pub fn uci_loop() {
 
             "go" => {
                 let go_params = parse_go_params(&tokens[1..]);
-                let eval = ClassicalEval::new();
-                let mut searcher = Searcher::new(pos.clone(), eval, &mut tt);
 
-                // Set time limit if we have time controls
-                if let Some(time_limit) = calculate_time_limit(&go_params, pos.side_to_move()) {
-                    searcher.set_time_limit(time_limit);
+                // 1. Check opening book first
+                if state.use_book {
+                    if let Some(ref book) = state.book {
+                        if let Some(book_move) = book.probe(&pos) {
+                            eprintln!("info string Book move");
+                            println!("bestmove {}", book_move);
+                            stdout.flush().ok();
+                            continue;
+                        }
+                    }
                 }
 
-                let info = searcher.search(go_params.depth);
+                // 2. Check tablebase for few-piece positions
+                if let Some(ref tb) = state.tablebase {
+                    if tb.is_in_tablebase(&pos) {
+                        if let Some(tb_move) = tb.best_move(&pos) {
+                            if let Some(wdl) = tb.probe_wdl(&pos) {
+                                eprintln!("info string Tablebase {:?}", wdl);
+                            }
+                            println!("bestmove {}", tb_move);
+                            stdout.flush().ok();
+                            continue;
+                        }
+                    }
+                }
+
+                // 3. Run normal search
+                let time_limit = calculate_time_limit(&go_params, pos.side_to_move());
+                let info = run_search(&pos, &mut tt, &eval_type, &state, time_limit, go_params.depth);
 
                 // Print search info
                 print_info(&info, &tt);
@@ -125,6 +234,43 @@ pub fn uci_loop() {
     }
 }
 
+/// Run search with the appropriate evaluator.
+fn run_search(
+    pos: &Position,
+    tt: &mut TranspositionTable,
+    eval_type: &EvalType,
+    _state: &EngineState,
+    time_limit: Option<Duration>,
+    depth: i32,
+) -> crate::search::SearchInfo {
+    match eval_type {
+        EvalType::Classical => {
+            let eval = ClassicalEval::new();
+            let mut searcher = Searcher::new(pos.clone(), eval, tt);
+            if let Some(limit) = time_limit {
+                searcher.set_time_limit(limit);
+            }
+            searcher.search(depth)
+        }
+        EvalType::Nnue(network) => {
+            // Create incremental NNUE evaluator with proper accumulator management
+            let nnue = IncrementalNnue::new(network.clone(), pos);
+            let mut searcher = NnueSearcher::new(pos.clone(), nnue, tt);
+            if let Some(limit) = time_limit {
+                searcher.set_time_limit(limit);
+            }
+            let info = searcher.search(depth);
+            // Convert NnueSearcher::SearchInfo to search::SearchInfo
+            crate::search::SearchInfo {
+                nodes: info.nodes,
+                depth: info.depth,
+                score: info.score,
+                pv: info.pv,
+            }
+        }
+    }
+}
+
 fn parse_position(tokens: &[&str]) -> Position {
     if tokens.is_empty() {
         return Position::startpos();
@@ -160,7 +306,7 @@ fn parse_position(tokens: &[&str]) -> Position {
 
 fn parse_move(pos: &Position, s: &str) -> Option<Move> {
     use crate::movegen::MoveList;
-    use crate::types::Square;
+    use crate::types::{Piece, Square};
 
     if s.len() < 4 {
         return None;
@@ -180,11 +326,11 @@ fn parse_move(pos: &Position, s: &str) -> Option<Move> {
             if let Some(p) = promo {
                 if mv.is_promotion() {
                     let promo_char = match mv.promotion_piece() {
-                        crate::types::Piece::Queen => 'q',
-                        crate::types::Piece::Rook => 'r',
-                        crate::types::Piece::Bishop => 'b',
-                        crate::types::Piece::Knight => 'n',
-                        _ => continue,
+                        Piece::Queen => 'q',
+                        Piece::Rook => 'r',
+                        Piece::Bishop => 'b',
+                        Piece::Knight => 'n',
+                        Piece::Pawn | Piece::King => unreachable!(),
                     };
                     if promo_char == p {
                         return Some(mv);
@@ -194,7 +340,7 @@ fn parse_move(pos: &Position, s: &str) -> Option<Move> {
                 return Some(mv);
             } else {
                 // Default to queen promotion
-                if matches!(mv.promotion_piece(), crate::types::Piece::Queen) {
+                if matches!(mv.promotion_piece(), Piece::Queen) {
                     return Some(mv);
                 }
             }
