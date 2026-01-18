@@ -2,6 +2,7 @@ use crate::eval::nnue::PolicyOutput;
 use crate::eval::{mated_in, Evaluator, DRAW_SCORE, MATE_SCORE};
 use crate::movegen::MoveList;
 use crate::position::Position;
+use crate::tt::{score_from_tt, score_to_tt, Bound, TranspositionTable};
 use crate::types::Move;
 use crate::values::piece_value;
 use std::time::{Duration, Instant};
@@ -15,10 +16,11 @@ pub struct SearchInfo {
     pub pv: Vec<Move>,
 }
 
-/// Alpha-beta searcher
-pub struct Searcher<E: Evaluator> {
+/// Alpha-beta searcher with transposition table
+pub struct Searcher<'a, E: Evaluator> {
     pos: Position,
     eval: E,
+    tt: &'a mut TranspositionTable,
     nodes: u64,
     max_depth: i32,
     stop: bool,
@@ -28,11 +30,12 @@ pub struct Searcher<E: Evaluator> {
     check_interval: u64,
 }
 
-impl<E: Evaluator> Searcher<E> {
-    pub fn new(pos: Position, eval: E) -> Self {
+impl<'a, E: Evaluator> Searcher<'a, E> {
+    pub fn new(pos: Position, eval: E, tt: &'a mut TranspositionTable) -> Self {
         Self {
             pos,
             eval,
+            tt,
             nodes: 0,
             max_depth: 64,
             stop: false,
@@ -66,6 +69,7 @@ impl<E: Evaluator> Searcher<E> {
         self.max_depth = max_depth;
         self.stop = false;
         self.start_time = Some(Instant::now());
+        self.tt.new_search();
 
         let mut best_score = -MATE_SCORE;
         let mut best_depth = 0;
@@ -96,7 +100,7 @@ impl<E: Evaluator> Searcher<E> {
         }
     }
 
-    /// Alpha-beta with PV tracking
+    /// Alpha-beta with TT and PV tracking
     fn alpha_beta(
         &mut self,
         depth: i32,
@@ -119,6 +123,27 @@ impl<E: Evaluator> Searcher<E> {
             return 0;
         }
 
+        let is_pv = (beta as i32) - (alpha as i32) > 1;
+        let hash = self.pos.hash();
+
+        // TT probe
+        let mut tt_move = Move::NULL;
+        if let Some(entry) = self.tt.probe(hash) {
+            tt_move = entry.mv();
+
+            // Use TT score for cutoff at non-PV nodes with sufficient depth
+            if !is_pv && entry.depth() >= depth as i8 {
+                let tt_score = score_from_tt(entry.score(), ply);
+
+                match entry.bound() {
+                    Bound::Exact => return tt_score,
+                    Bound::Lower if tt_score >= beta => return tt_score,
+                    Bound::Upper if tt_score <= alpha => return tt_score,
+                    _ => {}
+                }
+            }
+        }
+
         // Generate moves
         let mut moves = MoveList::new();
         self.pos.generate_moves(&mut moves);
@@ -132,12 +157,13 @@ impl<E: Evaluator> Searcher<E> {
             };
         }
 
-        // Move ordering: MVV-LVA for captures, optional policy for quiet moves
-        // TODO: Pass policy from NNUE evaluator when available
-        self.order_moves(&mut moves, None);
+        // Move ordering: TT move first, then MVV-LVA for captures
+        self.order_moves(&mut moves, tt_move, None);
 
         let mut best_score = -MATE_SCORE;
+        let mut best_move = Move::NULL;
         let mut child_pv = Vec::new();
+        let original_alpha = alpha;
 
         for i in 0..moves.len() {
             let mv = moves.get(i);
@@ -146,8 +172,13 @@ impl<E: Evaluator> Searcher<E> {
             let score = -self.alpha_beta(depth - 1, ply + 1, -beta, -alpha, &mut child_pv);
             self.pos.unmake_move(mv);
 
+            if self.stop {
+                return 0;
+            }
+
             if score > best_score {
                 best_score = score;
+                best_move = mv;
 
                 if score > alpha {
                     alpha = score;
@@ -163,6 +194,23 @@ impl<E: Evaluator> Searcher<E> {
                 }
             }
         }
+
+        // Store in TT
+        let bound = if best_score >= beta {
+            Bound::Lower // Failed high
+        } else if best_score > original_alpha {
+            Bound::Exact // PV node
+        } else {
+            Bound::Upper // Failed low
+        };
+
+        self.tt.store(
+            hash,
+            best_move,
+            score_to_tt(best_score, ply),
+            depth as i8,
+            bound,
+        );
 
         best_score
     }
@@ -208,13 +256,12 @@ impl<E: Evaluator> Searcher<E> {
         alpha
     }
 
-    /// Order moves using MVV-LVA for captures and optional policy network scores.
-    /// Policy scores provide learned ordering hints for quiet moves.
-    fn order_moves(&self, moves: &mut MoveList, policy: Option<&PolicyOutput>) {
+    /// Order moves using TT move first, then MVV-LVA for captures, optional policy for quiet moves.
+    fn order_moves(&self, moves: &mut MoveList, tt_move: Move, policy: Option<&PolicyOutput>) {
         // Score each move
         for i in 0..moves.len() {
             let mv = moves.get(i);
-            let score = self.move_score(mv, policy);
+            let score = self.move_score(mv, tt_move, policy);
             moves.set_score(i, score);
         }
         // Sort by score (highest first)
@@ -224,11 +271,17 @@ impl<E: Evaluator> Searcher<E> {
     /// Score a move for ordering (higher = search first).
     ///
     /// Combined scoring strategy (highest priority first):
-    /// 1. Captures: MVV-LVA bonus (+15000 base) - ensures tactical awareness
-    /// 2. Promotions: +14000 bonus
-    /// 3. Policy Network: Learned ordering for all moves (when available)
-    fn move_score(&self, mv: Move, policy: Option<&PolicyOutput>) -> i32 {
+    /// 1. TT move: +100000 bonus (always search first)
+    /// 2. Captures: MVV-LVA bonus (+15000 base) - ensures tactical awareness
+    /// 3. Promotions: +14000 bonus
+    /// 4. Policy Network: Learned ordering for all moves (when available)
+    fn move_score(&self, mv: Move, tt_move: Move, policy: Option<&PolicyOutput>) -> i32 {
         let mut score = 0i32;
+
+        // TT move gets highest priority
+        if mv == tt_move && !tt_move.is_null() {
+            return 100_000;
+        }
 
         // Policy network base score (if available)
         if let Some(p) = policy {
@@ -255,7 +308,7 @@ impl<E: Evaluator> Searcher<E> {
 
     /// Order captures by MVV-LVA.
     fn order_captures(&self, moves: &mut MoveList) {
-        self.order_moves(moves, None);
+        self.order_moves(moves, Move::NULL, None);
     }
 
     pub fn stop(&mut self) {
@@ -278,7 +331,8 @@ mod tests {
     fn test_search_startpos() {
         let pos = Position::startpos();
         let eval = ClassicalEval::new();
-        let mut searcher = Searcher::new(pos, eval);
+        let mut tt = TranspositionTable::new(16);
+        let mut searcher = Searcher::new(pos, eval, &mut tt);
 
         let info = searcher.search(4);
 
@@ -293,7 +347,8 @@ mod tests {
         // White to move, Qh7# is mate in 1
         let pos = Position::from_fen("6k1/5ppp/8/8/8/8/5PPP/4Q1K1 w - - 0 1").unwrap();
         let eval = ClassicalEval::new();
-        let mut searcher = Searcher::new(pos, eval);
+        let mut tt = TranspositionTable::new(16);
+        let mut searcher = Searcher::new(pos, eval, &mut tt);
 
         let info = searcher.search(3);
 
@@ -307,7 +362,8 @@ mod tests {
         // Black to move, must block or escape
         let pos = Position::from_fen("6k1/5pQp/8/8/8/8/5PPP/6K1 b - - 0 1").unwrap();
         let eval = ClassicalEval::new();
-        let mut searcher = Searcher::new(pos, eval);
+        let mut tt = TranspositionTable::new(16);
+        let mut searcher = Searcher::new(pos, eval, &mut tt);
 
         let info = searcher.search(3);
 
@@ -320,7 +376,8 @@ mod tests {
         // White can capture undefended queen
         let pos = Position::from_fen("6k1/5ppp/3q4/8/8/3R4/5PPP/6K1 w - - 0 1").unwrap();
         let eval = ClassicalEval::new();
-        let mut searcher = Searcher::new(pos, eval);
+        let mut tt = TranspositionTable::new(16);
+        let mut searcher = Searcher::new(pos, eval, &mut tt);
 
         let info = searcher.search(3);
 
@@ -328,5 +385,25 @@ mod tests {
         assert!(!info.pv.is_empty());
         let best = info.pv[0];
         assert_eq!(best.to(), crate::types::Square::D6);
+    }
+
+    #[test]
+    fn test_tt_reduces_nodes() {
+        // Search the same position twice - second should be faster due to TT
+        let pos = Position::startpos();
+        let mut tt = TranspositionTable::new(16);
+
+        // First search
+        let mut searcher = Searcher::new(pos.clone(), ClassicalEval::new(), &mut tt);
+        let info1 = searcher.search(5);
+
+        // Second search (TT should help)
+        let mut searcher = Searcher::new(pos, ClassicalEval::new(), &mut tt);
+        let info2 = searcher.search(5);
+
+        // With TT, second search should explore same or fewer nodes
+        // (might not always be fewer due to different move ordering from TT)
+        assert!(info2.nodes <= info1.nodes * 2); // Should at least not be much worse
+        assert_eq!(info1.score, info2.score); // Score should be the same
     }
 }

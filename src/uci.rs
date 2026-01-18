@@ -2,12 +2,14 @@ use crate::eval::classical::ClassicalEval;
 use crate::eval::is_mate_score;
 use crate::position::Position;
 use crate::search::Searcher;
+use crate::tt::TranspositionTable;
 use crate::types::{Color, Move};
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
 const ENGINE_NAME: &str = "Aleph";
 const ENGINE_AUTHOR: &str = "Aleph Authors";
+const DEFAULT_HASH_MB: usize = 64;
 
 /// Run the UCI protocol loop
 pub fn uci_loop() {
@@ -15,6 +17,7 @@ pub fn uci_loop() {
     let mut stdout = io::stdout();
 
     let mut pos = Position::startpos();
+    let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -31,9 +34,25 @@ pub fn uci_loop() {
             "uci" => {
                 println!("id name {}", ENGINE_NAME);
                 println!("id author {}", ENGINE_AUTHOR);
-                println!("option name Hash type spin default 64 min 1 max 4096");
+                println!("option name Hash type spin default {} min 1 max 4096", DEFAULT_HASH_MB);
                 println!("uciok");
                 stdout.flush().ok();
+            }
+
+            "setoption" => {
+                // Parse: setoption name Hash value 128
+                if tokens.len() >= 5 && tokens[1] == "name" && tokens[3] == "value" {
+                    let name = tokens[2].to_lowercase();
+                    let value = tokens[4];
+
+                    if name == "hash" {
+                        if let Ok(size_mb) = value.parse::<usize>() {
+                            let size_mb = size_mb.max(1).min(4096);
+                            tt.resize(size_mb);
+                            eprintln!("info string Hash table resized to {} MB", size_mb);
+                        }
+                    }
+                }
             }
 
             "isready" => {
@@ -43,6 +62,7 @@ pub fn uci_loop() {
 
             "ucinewgame" => {
                 pos = Position::startpos();
+                tt.clear();
             }
 
             "position" => {
@@ -52,7 +72,7 @@ pub fn uci_loop() {
             "go" => {
                 let go_params = parse_go_params(&tokens[1..]);
                 let eval = ClassicalEval::new();
-                let mut searcher = Searcher::new(pos.clone(), eval);
+                let mut searcher = Searcher::new(pos.clone(), eval, &mut tt);
 
                 // Set time limit if we have time controls
                 if let Some(time_limit) = calculate_time_limit(&go_params, pos.side_to_move()) {
@@ -62,7 +82,7 @@ pub fn uci_loop() {
                 let info = searcher.search(go_params.depth);
 
                 // Print search info
-                print_info(&info);
+                print_info(&info, &tt);
 
                 // Print best move
                 if !info.pv.is_empty() {
@@ -315,7 +335,7 @@ fn calculate_time_limit(params: &GoParams, side: Color) -> Option<Duration> {
     Some(Duration::from_millis(time_ms))
 }
 
-fn print_info(info: &crate::search::SearchInfo) {
+fn print_info(info: &crate::search::SearchInfo, tt: &TranspositionTable) {
     let score_str = if is_mate_score(info.score) {
         let mate_dist = if info.score > 0 {
             (30000 - info.score + 1) / 2
@@ -335,8 +355,8 @@ fn print_info(info: &crate::search::SearchInfo) {
         .join(" ");
 
     println!(
-        "info depth {} score {} nodes {} pv {}",
-        info.depth, score_str, info.nodes, pv_str
+        "info depth {} score {} nodes {} hashfull {} pv {}",
+        info.depth, score_str, info.nodes, tt.hashfull(), pv_str
     );
 }
 

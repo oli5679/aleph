@@ -58,7 +58,8 @@ fn main() {
             println!("{}", pos);
 
             let eval = aleph::eval::classical::ClassicalEval::new();
-            let mut searcher = aleph::search::Searcher::new(pos, eval);
+            let mut tt = aleph::tt::TranspositionTable::new(64);
+            let mut searcher = aleph::search::Searcher::new(pos, eval, &mut tt);
 
             let start = Instant::now();
             let info = searcher.search(depth);
