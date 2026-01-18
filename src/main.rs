@@ -76,6 +76,16 @@ fn main() {
             }
             println!();
         }
+        "nnue-info" => {
+            let path = args.get(2).map(|s| s.as_str()).unwrap_or("network.nnue");
+            match aleph::eval::nnue::stockfish::print_stockfish_info(path) {
+                Ok(()) => {}
+                Err(e) => {
+                    println!("Error reading NNUE file: {}", e);
+                    println!("Note: This command reads Stockfish NNUE network files.");
+                }
+            }
+        }
         "--help" | "-h" | "help" => {
             print_help();
         }
@@ -90,13 +100,14 @@ fn print_help() {
     println!("Aleph Chess Engine v0.1.0");
     println!();
     println!("Usage:");
-    println!("  aleph                     - Start UCI mode");
-    println!("  aleph uci                 - Start UCI mode");
+    println!("  aleph                      - Start UCI mode");
+    println!("  aleph uci                  - Start UCI mode");
     println!("  aleph search <depth> [fen] - Search position");
     println!("  aleph perft <depth> [fen]  - Run perft test");
     println!("  aleph divide <depth> [fen] - Perft with move breakdown");
-    println!("  aleph bench               - Run perft benchmarks");
-    println!("  aleph help                - Show this help");
+    println!("  aleph bench                - Run perft benchmarks");
+    println!("  aleph nnue-info <path>     - Show NNUE network info");
+    println!("  aleph help                 - Show this help");
 }
 
 fn run_bench() {

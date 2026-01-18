@@ -1,0 +1,65 @@
+token: "LICHESS_TOKEN_PLACEHOLDER"
+
+engine:
+  dir: "./engines"
+  name: "aleph"
+  protocol: "uci"
+  ponder: false
+
+  # UCI options
+  uci_options:
+    Hash: 128
+
+# Abort games when engine fails
+abort_time: 30
+
+# Challenge settings
+challenge:
+  concurrency: 1
+  sort_by: "best"
+  accept_bot: true
+  only_bot: false
+  max_increment: 180
+  min_increment: 0
+  max_base: 1800  # 30 minutes max
+  min_base: 0
+  max_days: 14
+  min_days: 1
+
+  # Variants to accept
+  variants:
+    - standard
+    # - chess960  # Enable if you want
+
+  # Time controls to accept
+  time_controls:
+    - bullet
+    - blitz
+    - rapid
+    - classical
+    - correspondence
+
+  # Modes
+  modes:
+    - casual
+    - rated
+
+# Matchmaking (auto-challenge bots)
+matchmaking:
+  allow_matchmaking: false  # Set to true to auto-challenge
+  challenge_variant: "standard"
+  challenge_timeout: 30
+  challenge_initial_time:
+    - 60   # 1 minute
+    - 180  # 3 minutes
+  challenge_increment:
+    - 0
+    - 2
+  opponent_min_rating: 1500
+  opponent_max_rating: 2500
+  challenge_mode: "rated"
+
+# Greeting messages (optional)
+greeting:
+  hello: "Hi! I'm Aleph, a chess engine. Good luck!"
+  goodbye: "Good game! Thanks for playing."

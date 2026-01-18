@@ -2,8 +2,9 @@ use crate::eval::classical::ClassicalEval;
 use crate::eval::is_mate_score;
 use crate::position::Position;
 use crate::search::Searcher;
-use crate::types::Move;
+use crate::types::{Color, Move};
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 const ENGINE_NAME: &str = "Aleph";
 const ENGINE_AUTHOR: &str = "Aleph Authors";
@@ -49,13 +50,19 @@ pub fn uci_loop() {
             }
 
             "go" => {
-                let depth = parse_go_depth(&tokens[1..]);
+                let go_params = parse_go_params(&tokens[1..]);
                 let eval = ClassicalEval::new();
                 let mut searcher = Searcher::new(pos.clone(), eval);
-                let info = searcher.search(depth);
+
+                // Set time limit if we have time controls
+                if let Some(time_limit) = calculate_time_limit(&go_params, pos.side_to_move()) {
+                    searcher.set_time_limit(time_limit);
+                }
+
+                let info = searcher.search(go_params.depth);
 
                 // Print search info
-                print_info(&info, depth);
+                print_info(&info);
 
                 // Print best move
                 if !info.pv.is_empty() {
@@ -178,28 +185,72 @@ fn parse_move(pos: &Position, s: &str) -> Option<Move> {
     Move::from_uci(s)
 }
 
-fn parse_go_depth(tokens: &[&str]) -> i32 {
-    let mut depth = 6; // Default depth
+/// Parameters parsed from the "go" command
+#[derive(Default)]
+struct GoParams {
+    depth: i32,
+    wtime: Option<u64>,  // White time in ms
+    btime: Option<u64>,  // Black time in ms
+    winc: Option<u64>,   // White increment in ms
+    binc: Option<u64>,   // Black increment in ms
+    movestogo: Option<u32>,
+    movetime: Option<u64>, // Fixed time per move in ms
+    infinite: bool,
+}
+
+fn parse_go_params(tokens: &[&str]) -> GoParams {
+    let mut params = GoParams {
+        depth: 64, // Default to max depth (time will limit search)
+        ..Default::default()
+    };
 
     let mut i = 0;
     while i < tokens.len() {
         match tokens[i] {
             "depth" => {
                 if i + 1 < tokens.len() {
-                    depth = tokens[i + 1].parse().unwrap_or(6);
+                    params.depth = tokens[i + 1].parse().unwrap_or(64);
+                }
+                i += 2;
+            }
+            "wtime" => {
+                if i + 1 < tokens.len() {
+                    params.wtime = tokens[i + 1].parse().ok();
+                }
+                i += 2;
+            }
+            "btime" => {
+                if i + 1 < tokens.len() {
+                    params.btime = tokens[i + 1].parse().ok();
+                }
+                i += 2;
+            }
+            "winc" => {
+                if i + 1 < tokens.len() {
+                    params.winc = tokens[i + 1].parse().ok();
+                }
+                i += 2;
+            }
+            "binc" => {
+                if i + 1 < tokens.len() {
+                    params.binc = tokens[i + 1].parse().ok();
+                }
+                i += 2;
+            }
+            "movestogo" => {
+                if i + 1 < tokens.len() {
+                    params.movestogo = tokens[i + 1].parse().ok();
                 }
                 i += 2;
             }
             "movetime" => {
-                // TODO: Implement time management
-                i += 2;
-            }
-            "wtime" | "btime" | "winc" | "binc" | "movestogo" => {
-                // TODO: Implement time management
+                if i + 1 < tokens.len() {
+                    params.movetime = tokens[i + 1].parse().ok();
+                }
                 i += 2;
             }
             "infinite" => {
-                depth = 100;
+                params.infinite = true;
                 i += 1;
             }
             _ => {
@@ -208,10 +259,63 @@ fn parse_go_depth(tokens: &[&str]) -> i32 {
         }
     }
 
-    depth.min(64) // Cap at reasonable depth
+    // If no time controls specified and not infinite, use a reasonable default depth
+    if params.wtime.is_none() && params.movetime.is_none() && !params.infinite && params.depth == 64 {
+        params.depth = 6;
+    }
+
+    params.depth = params.depth.min(64);
+    params
 }
 
-fn print_info(info: &crate::search::SearchInfo, depth: i32) {
+/// Calculate how much time to spend on this move
+fn calculate_time_limit(params: &GoParams, side: Color) -> Option<Duration> {
+    // Fixed time per move
+    if let Some(movetime) = params.movetime {
+        // Use slightly less than movetime to account for overhead
+        return Some(Duration::from_millis(movetime.saturating_sub(50)));
+    }
+
+    // Infinite search - no time limit
+    if params.infinite {
+        return None;
+    }
+
+    // Get our time and increment
+    let (our_time, our_inc) = match side {
+        Color::White => (params.wtime?, params.winc.unwrap_or(0)),
+        Color::Black => (params.btime?, params.binc.unwrap_or(0)),
+    };
+
+    // Simple time management:
+    // - If movestogo is set, divide remaining time by moves to go
+    // - Otherwise, assume ~30 moves left in the game
+    // - Add a portion of increment
+    // - Use a safety margin to avoid flagging
+
+    let moves_to_go = params.movestogo.unwrap_or(30) as u64;
+
+    // Base time: divide remaining time by expected moves
+    let base_time = our_time / moves_to_go.max(1);
+
+    // Add most of our increment (save a little for safety)
+    let with_inc = base_time + (our_inc * 3 / 4);
+
+    // Don't use more than 1/5 of remaining time on any single move
+    let max_time = our_time / 5;
+
+    // Apply limits and safety margin
+    let time_ms = with_inc.min(max_time).saturating_sub(50);
+
+    // Minimum 100ms to have any meaningful search
+    if time_ms < 100 {
+        return Some(Duration::from_millis(100));
+    }
+
+    Some(Duration::from_millis(time_ms))
+}
+
+fn print_info(info: &crate::search::SearchInfo) {
     let score_str = if is_mate_score(info.score) {
         let mate_dist = if info.score > 0 {
             (30000 - info.score + 1) / 2
@@ -232,7 +336,7 @@ fn print_info(info: &crate::search::SearchInfo, depth: i32) {
 
     println!(
         "info depth {} score {} nodes {} pv {}",
-        depth, score_str, info.nodes, pv_str
+        info.depth, score_str, info.nodes, pv_str
     );
 }
 

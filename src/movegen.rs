@@ -5,6 +5,7 @@ use crate::types::{CastlingRights, Color, Move, Piece, Square};
 
 pub struct MoveList {
     moves: [Move; 256],
+    scores: [i32; 256],
     len: usize,
 }
 
@@ -13,6 +14,7 @@ impl MoveList {
     pub fn new() -> Self {
         Self {
             moves: [Move::NULL; 256],
+            scores: [0; 256],
             len: 0,
         }
     }
@@ -21,6 +23,7 @@ impl MoveList {
     pub fn push(&mut self, mv: Move) {
         debug_assert!(self.len < 256);
         self.moves[self.len] = mv;
+        self.scores[self.len] = 0;
         self.len += 1;
     }
 
@@ -44,9 +47,41 @@ impl MoveList {
         self.moves[idx]
     }
 
+    /// Set the score for a move at the given index.
+    #[inline]
+    pub fn set_score(&mut self, idx: usize, score: i32) {
+        self.scores[idx] = score;
+    }
+
+    /// Get the score for a move at the given index.
+    #[inline]
+    pub fn get_score(&self, idx: usize) -> i32 {
+        self.scores[idx]
+    }
+
     #[inline]
     pub fn swap(&mut self, i: usize, j: usize) {
         self.moves.swap(i, j);
+        self.scores.swap(i, j);
+    }
+
+    /// Sort moves by their scores in descending order (highest first).
+    /// Uses selection sort which is efficient for small lists and allows
+    /// lazy evaluation - we only need to find the best move each time.
+    pub fn sort_by_score(&mut self) {
+        for i in 0..self.len {
+            let mut best_idx = i;
+            let mut best_score = self.scores[i];
+            for j in (i + 1)..self.len {
+                if self.scores[j] > best_score {
+                    best_score = self.scores[j];
+                    best_idx = j;
+                }
+            }
+            if best_idx != i {
+                self.swap(i, best_idx);
+            }
+        }
     }
 
     #[inline]
@@ -375,7 +410,7 @@ impl Position {
 
     fn filter_legal(&self, moves: &mut MoveList) {
         let mut i = 0;
-        while i < moves.len {
+        while i < moves.len() {
             let mv = moves.get(i);
             let mut copy = self.clone();
             copy.make_move(mv);
@@ -385,8 +420,9 @@ impl Position {
             let king_sq = copy.king_sq(self.side_to_move());
             if copy.is_attacked(king_sq, self.side_to_move().flip()) {
                 // Illegal move - swap with last and reduce length
-                moves.moves[i] = moves.moves[moves.len - 1];
-                moves.len -= 1;
+                let last = moves.len() - 1;
+                moves.swap(i, last);
+                moves.truncate(last);
             } else {
                 i += 1;
             }

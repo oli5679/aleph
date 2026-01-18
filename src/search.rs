@@ -1,7 +1,10 @@
+use crate::eval::nnue::PolicyOutput;
 use crate::eval::{mated_in, Evaluator, DRAW_SCORE, MATE_SCORE};
 use crate::movegen::MoveList;
 use crate::position::Position;
 use crate::types::Move;
+use crate::values::piece_value;
+use std::time::{Duration, Instant};
 
 /// Search statistics
 #[derive(Default, Clone)]
@@ -19,6 +22,10 @@ pub struct Searcher<E: Evaluator> {
     nodes: u64,
     max_depth: i32,
     stop: bool,
+    // Time management
+    start_time: Option<Instant>,
+    time_limit: Option<Duration>,
+    check_interval: u64,
 }
 
 impl<E: Evaluator> Searcher<E> {
@@ -29,6 +36,27 @@ impl<E: Evaluator> Searcher<E> {
             nodes: 0,
             max_depth: 64,
             stop: false,
+            start_time: None,
+            time_limit: None,
+            check_interval: 2048, // Check time every N nodes
+        }
+    }
+
+    /// Set a time limit for the search
+    pub fn set_time_limit(&mut self, limit: Duration) {
+        self.time_limit = Some(limit);
+    }
+
+    /// Check if we should stop due to time
+    #[inline]
+    fn check_time(&mut self) {
+        if self.nodes & (self.check_interval - 1) != 0 {
+            return; // Only check every N nodes
+        }
+        if let (Some(start), Some(limit)) = (self.start_time, self.time_limit) {
+            if start.elapsed() >= limit {
+                self.stop = true;
+            }
         }
     }
 
@@ -37,8 +65,10 @@ impl<E: Evaluator> Searcher<E> {
         self.nodes = 0;
         self.max_depth = max_depth;
         self.stop = false;
+        self.start_time = Some(Instant::now());
 
         let mut best_score = -MATE_SCORE;
+        let mut best_depth = 0;
         let mut pv = Vec::new();
 
         for depth in 1..=max_depth {
@@ -51,6 +81,7 @@ impl<E: Evaluator> Searcher<E> {
 
             if !self.stop {
                 best_score = score;
+                best_depth = depth;
                 if !local_pv.is_empty() {
                     pv = local_pv;
                 }
@@ -59,7 +90,7 @@ impl<E: Evaluator> Searcher<E> {
 
         SearchInfo {
             nodes: self.nodes,
-            depth: max_depth,
+            depth: best_depth,
             score: best_score,
             pv,
         }
@@ -82,6 +113,11 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         self.nodes += 1;
+        self.check_time();
+
+        if self.stop {
+            return 0;
+        }
 
         // Generate moves
         let mut moves = MoveList::new();
@@ -96,8 +132,9 @@ impl<E: Evaluator> Searcher<E> {
             };
         }
 
-        // Simple move ordering: try captures first
-        self.order_moves(&mut moves);
+        // Move ordering: MVV-LVA for captures, optional policy for quiet moves
+        // TODO: Pass policy from NNUE evaluator when available
+        self.order_moves(&mut moves, None);
 
         let mut best_score = -MATE_SCORE;
         let mut child_pv = Vec::new();
@@ -171,50 +208,54 @@ impl<E: Evaluator> Searcher<E> {
         alpha
     }
 
-    /// Simple move ordering: captures first, then by destination square
-    fn order_moves(&self, moves: &mut MoveList) {
-        // Bubble sort by capture status (good enough for now)
+    /// Order moves using MVV-LVA for captures and optional policy network scores.
+    /// Policy scores provide learned ordering hints for quiet moves.
+    fn order_moves(&self, moves: &mut MoveList, policy: Option<&PolicyOutput>) {
+        // Score each move
         for i in 0..moves.len() {
-            for j in (i + 1)..moves.len() {
-                let mi = moves.get(i);
-                let mj = moves.get(j);
-
-                let score_i = self.move_score(mi);
-                let score_j = self.move_score(mj);
-
-                if score_j > score_i {
-                    moves.swap(i, j);
-                }
-            }
+            let mv = moves.get(i);
+            let score = self.move_score(mv, policy);
+            moves.set_score(i, score);
         }
+        // Sort by score (highest first)
+        moves.sort_by_score();
     }
 
-    /// Score a move for ordering (higher = search first)
-    fn move_score(&self, mv: Move) -> i32 {
+    /// Score a move for ordering (higher = search first).
+    ///
+    /// Combined scoring strategy (highest priority first):
+    /// 1. Captures: MVV-LVA bonus (+15000 base) - ensures tactical awareness
+    /// 2. Promotions: +14000 bonus
+    /// 3. Policy Network: Learned ordering for all moves (when available)
+    fn move_score(&self, mv: Move, policy: Option<&PolicyOutput>) -> i32 {
         let mut score = 0i32;
 
-        // Captures scored by MVV-LVA
+        // Policy network base score (if available)
+        if let Some(p) = policy {
+            score += p.from[mv.from().index()] + p.to[mv.to().index()];
+        }
+
+        // MVV-LVA for captures (always add - ensures tactics searched first)
         if let Some((_, captured)) = self.pos.piece_at(mv.to()) {
             let victim_value = piece_value(captured);
-            // Find attacker
             if let Some((_, attacker)) = self.pos.piece_at(mv.from()) {
                 let attacker_value = piece_value(attacker);
                 // MVV-LVA: prefer capturing valuable pieces with cheap pieces
-                score += 10000 + victim_value as i32 * 10 - attacker_value as i32;
+                score += 15000 + victim_value as i32 * 10 - attacker_value as i32;
             }
         }
 
-        // Promotions
+        // Promotions (almost as important as captures)
         if mv.is_promotion() {
-            score += 9000;
+            score += 14000;
         }
 
         score
     }
 
-    /// Order captures by MVV-LVA
+    /// Order captures by MVV-LVA.
     fn order_captures(&self, moves: &mut MoveList) {
-        self.order_moves(moves);
+        self.order_moves(moves, None);
     }
 
     pub fn stop(&mut self) {
@@ -226,18 +267,6 @@ impl<E: Evaluator> Searcher<E> {
     }
 }
 
-use crate::types::Piece;
-
-fn piece_value(piece: Piece) -> i16 {
-    match piece {
-        Piece::Pawn => 100,
-        Piece::Knight => 320,
-        Piece::Bishop => 330,
-        Piece::Rook => 500,
-        Piece::Queen => 900,
-        Piece::King => 20000,
-    }
-}
 
 #[cfg(test)]
 mod tests {
