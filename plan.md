@@ -25,6 +25,7 @@ High-performance chess engine in Rust with **distributional evaluation**.
 | 11 | Minimal UCI protocol | `src/uci.rs` | [x] |
 
 **Milestone**: Play test games vs Stockfish using cutechess-cli
+**Achieved**: ~2100-2150 ELO at depth 4 (beats SF UCI_Elo 2100 60%, loses to 2250 40%)
 
 ### Phase 2 Tasks (after Phase 1)
 
@@ -37,7 +38,7 @@ High-performance chess engine in Rust with **distributional evaluation**.
 | 16 | Time management | `src/search/time.rs` | [ ] |
 | 17 | Enhanced eval (pawn structure, king safety) | `src/eval/classical.rs` | [ ] |
 
-**Milestone**: ~1800-2000 Elo with classical eval
+**Milestone**: ~2300-2500 ELO with time management (baseline: ~2100 at depth 4)
 
 ### Phase 3 Tasks (Distributional NNUE)
 
