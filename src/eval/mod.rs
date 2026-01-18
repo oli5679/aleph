@@ -1,6 +1,7 @@
 pub mod classical;
 
 use crate::position::Position;
+use crate::types::Piece;
 
 /// Evaluation quantiles - the core abstraction for distributional evaluation.
 ///
@@ -105,6 +106,19 @@ pub const fn mated_in(ply: i16) -> i16 {
 #[inline]
 pub const fn is_mate_score(score: i16) -> bool {
     score.abs() > MATE_SCORE - 1000
+}
+
+/// Material values in centipawns
+#[inline]
+pub const fn piece_value(piece: Piece) -> i16 {
+    match piece {
+        Piece::Pawn => 100,
+        Piece::Knight => 320,
+        Piece::Bishop => 330,
+        Piece::Rook => 500,
+        Piece::Queen => 900,
+        Piece::King => 20000,
+    }
 }
 
 #[cfg(test)]

@@ -133,7 +133,7 @@ fn parse_position(tokens: &[&str]) -> Position {
 
 fn parse_move(pos: &Position, s: &str) -> Option<Move> {
     use crate::movegen::MoveList;
-    use crate::types::Square;
+    use crate::types::{Piece, Square};
 
     if s.len() < 4 {
         return None;
@@ -153,11 +153,11 @@ fn parse_move(pos: &Position, s: &str) -> Option<Move> {
             if let Some(p) = promo {
                 if mv.is_promotion() {
                     let promo_char = match mv.promotion_piece() {
-                        crate::types::Piece::Queen => 'q',
-                        crate::types::Piece::Rook => 'r',
-                        crate::types::Piece::Bishop => 'b',
-                        crate::types::Piece::Knight => 'n',
-                        _ => continue,
+                        Piece::Queen => 'q',
+                        Piece::Rook => 'r',
+                        Piece::Bishop => 'b',
+                        Piece::Knight => 'n',
+                        Piece::Pawn | Piece::King => unreachable!(),
                     };
                     if promo_char == p {
                         return Some(mv);
@@ -167,7 +167,7 @@ fn parse_move(pos: &Position, s: &str) -> Option<Move> {
                 return Some(mv);
             } else {
                 // Default to queen promotion
-                if matches!(mv.promotion_piece(), crate::types::Piece::Queen) {
+                if matches!(mv.promotion_piece(), Piece::Queen) {
                     return Some(mv);
                 }
             }

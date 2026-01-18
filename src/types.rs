@@ -327,7 +327,7 @@ impl fmt::Display for Move {
                 Piece::Bishop => 'b',
                 Piece::Rook => 'r',
                 Piece::Queen => 'q',
-                _ => '?',
+                Piece::Pawn | Piece::King => unreachable!(),
             };
             write!(f, "{}", c)?;
         }

@@ -1,4 +1,4 @@
-use crate::eval::{Evaluator, Quantiles};
+use crate::eval::{piece_value, Evaluator, Quantiles};
 use crate::position::Position;
 use crate::types::{Color, Piece};
 
@@ -25,22 +25,6 @@ impl Evaluator for ClassicalEval {
     }
 }
 
-/// Material values in centipawns
-const PAWN_VALUE: i16 = 100;
-const KNIGHT_VALUE: i16 = 320;
-const BISHOP_VALUE: i16 = 330;
-const ROOK_VALUE: i16 = 500;
-const QUEEN_VALUE: i16 = 900;
-
-const PIECE_VALUES: [i16; 6] = [
-    PAWN_VALUE,
-    KNIGHT_VALUE,
-    BISHOP_VALUE,
-    ROOK_VALUE,
-    QUEEN_VALUE,
-    0, // King has no material value
-];
-
 /// Evaluate position from side-to-move perspective.
 fn evaluate_classical(pos: &Position) -> i16 {
     let white_score = evaluate_side(pos, Color::White);
@@ -58,19 +42,10 @@ fn evaluate_classical(pos: &Position) -> i16 {
 fn evaluate_side(pos: &Position, color: Color) -> i16 {
     let mut score = 0i16;
 
-    // Material
-    for (piece_idx, &value) in PIECE_VALUES.iter().enumerate() {
-        let piece = match piece_idx {
-            0 => Piece::Pawn,
-            1 => Piece::Knight,
-            2 => Piece::Bishop,
-            3 => Piece::Rook,
-            4 => Piece::Queen,
-            5 => Piece::King,
-            _ => unreachable!(),
-        };
+    // Material (King value is 20000 but we don't count it since both sides have one)
+    for &piece in &[Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
         let count = pos.pieces(color, piece).count() as i16;
-        score += count * value;
+        score += count * piece_value(piece);
     }
 
     // Piece-square tables
@@ -79,65 +54,28 @@ fn evaluate_side(pos: &Position, color: Color) -> i16 {
     score
 }
 
+/// Sum PST values for all pieces on a bitboard.
+fn pst_sum(pos: &Position, color: Color, piece: Piece, pst: &[i16; 64]) -> i16 {
+    pos.pieces(color, piece)
+        .map(|sq| {
+            let idx = if color == Color::White {
+                sq.index()
+            } else {
+                sq.flip_rank().index()
+            };
+            pst[idx]
+        })
+        .sum()
+}
+
 /// Piece-square table bonus for a side.
 fn psqt_score(pos: &Position, color: Color) -> i16 {
-    let mut score = 0i16;
-
-    for sq in pos.pieces(color, Piece::Pawn) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += PAWN_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Knight) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += KNIGHT_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Bishop) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += BISHOP_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Rook) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += ROOK_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::Queen) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += QUEEN_PST[idx];
-    }
-
-    for sq in pos.pieces(color, Piece::King) {
-        let idx = if color == Color::White {
-            sq.index()
-        } else {
-            sq.flip_rank().index()
-        };
-        score += KING_PST[idx];
-    }
-
-    score
+    pst_sum(pos, color, Piece::Pawn, &PAWN_PST)
+        + pst_sum(pos, color, Piece::Knight, &KNIGHT_PST)
+        + pst_sum(pos, color, Piece::Bishop, &BISHOP_PST)
+        + pst_sum(pos, color, Piece::Rook, &ROOK_PST)
+        + pst_sum(pos, color, Piece::Queen, &QUEEN_PST)
+        + pst_sum(pos, color, Piece::King, &KING_PST)
 }
 
 // Piece-square tables (from White's perspective, a1=0, h8=63)

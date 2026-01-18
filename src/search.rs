@@ -1,4 +1,4 @@
-use crate::eval::{mated_in, Evaluator, DRAW_SCORE, MATE_SCORE};
+use crate::eval::{mated_in, piece_value, Evaluator, DRAW_SCORE, MATE_SCORE};
 use crate::movegen::MoveList;
 use crate::position::Position;
 use crate::types::Move;
@@ -102,9 +102,7 @@ impl<E: Evaluator> Searcher<E> {
         let mut best_score = -MATE_SCORE;
         let mut child_pv = Vec::new();
 
-        for i in 0..moves.len() {
-            let mv = moves.get(i);
-
+        for mv in moves.iter() {
             self.pos.make_move(mv);
             let score = -self.alpha_beta(depth - 1, ply + 1, -beta, -alpha, &mut child_pv);
             self.pos.unmake_move(mv);
@@ -152,9 +150,7 @@ impl<E: Evaluator> Searcher<E> {
         // Order captures by MVV-LVA
         self.order_captures(&mut captures);
 
-        for i in 0..captures.len() {
-            let mv = captures.get(i);
-
+        for mv in captures.iter() {
             self.pos.make_move(mv);
             let score = -self.quiescence(-beta, -alpha);
             self.pos.unmake_move(mv);
@@ -223,19 +219,6 @@ impl<E: Evaluator> Searcher<E> {
 
     pub fn nodes(&self) -> u64 {
         self.nodes
-    }
-}
-
-use crate::types::Piece;
-
-fn piece_value(piece: Piece) -> i16 {
-    match piece {
-        Piece::Pawn => 100,
-        Piece::Knight => 320,
-        Piece::Bishop => 330,
-        Piece::Rook => 500,
-        Piece::Queen => 900,
-        Piece::King => 20000,
     }
 }
 
